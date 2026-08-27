@@ -1,4 +1,4 @@
-module github.com/theirish81/doauth
+module github.com/fragshq/doauth
 
 go 1.25.0
 

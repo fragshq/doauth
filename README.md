@@ -15,7 +15,7 @@
 ## Installation
 
 ```bash
-go get github.com/theirish81/doauth
+go get github.com/fragshq/doauth
 ```
 
 ## Quick Start (Standard Discovery)
@@ -26,7 +26,7 @@ package main
 import (
     "context"
     "fmt"
-    "github.com/theirish81/doauth"
+    "github.com/fragshq/doauth"
 )
 
 func main() {
