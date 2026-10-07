@@ -235,7 +235,12 @@ func ProbeMetadata(ctx context.Context, baseURL string, client *http.Client, log
 
 		if discoveryURL != "" {
 			a.logger.Debug("found discovery pointer in headers", "discovery_url", discoveryURL)
-			m, err := a.greedyDiscover(ctx, discoveryURL, true, make(map[string]bool))
+			// The pointer is usually the exact document: fetch it before guessing well-known paths,
+			// which could otherwise land on unrelated host-root metadata.
+			m, err := a.greedyDiscover(ctx, discoveryURL, false, make(map[string]bool))
+			if err != nil {
+				m, err = a.greedyDiscover(ctx, discoveryURL, true, make(map[string]bool))
+			}
 			if err == nil {
 				return m, true, nil
 			}

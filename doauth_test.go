@@ -78,6 +78,39 @@ func TestDiscovery_Probe_MCP(t *testing.T) {
 	assert.Equal(t, "http://example.com/auth", auth.GetMetadata().AuthorizationURL)
 }
 
+func TestDiscovery_Probe_PreferredOverWellKnown(t *testing.T) {
+	muxAS := http.NewServeMux()
+	muxAS.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://right.example.com/auth","token_endpoint":"http://right.example.com/token"}`))
+	})
+	tsAS := httptest.NewServer(muxAS)
+	defer tsAS.Close()
+
+	// Shared host: the root advertises some other AS, the tenant's MCP resource points elsewhere.
+	var tsRes *httptest.Server
+	muxRes := http.NewServeMux()
+	muxRes.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://wrong.example.com/auth","token_endpoint":"http://wrong.example.com/token"}`))
+	})
+	muxRes.HandleFunc("/prm/tenantA", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Metadata{Resource: tsRes.URL + "/tenantA/mcp", AuthorizationServers: []string{tsAS.URL}})
+	})
+	muxRes.HandleFunc("/tenantA/mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+tsRes.URL+`/prm/tenantA"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	tsRes = httptest.NewServer(muxRes)
+	defer tsRes.Close()
+
+	auth, err := NewAuthenticator(Config{BaseURL: tsRes.URL + "/tenantA/mcp", ClientID: "id", RedirectURL: "url"})
+	require.NoError(t, err)
+
+	required, err := auth.Discover(context.Background())
+	assert.NoError(t, err)
+	assert.True(t, required)
+	assert.Equal(t, "http://right.example.com/auth", auth.GetMetadata().AuthorizationURL)
+}
+
 func TestDiscovery_Probe_401(t *testing.T) {
 	muxDisc := http.NewServeMux()
 	muxDisc.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
