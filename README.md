@@ -70,6 +70,16 @@ func main() {
 3.  **Greedy Fetch**: It attempts to fetch the `BaseURL` directly, as some servers serve metadata at the root of the API path.
 4.  **Chain Resolution**: If the discovery points to a "Protected Resource Metadata" (RFC 9728), it follows the chain to the actual Authorization Server, which is looked up in RFC 8414 order. If the chain can't be resolved, the search moves on to the next location.
 
+### Scope Selection
+
+When `Config.Scopes` is empty, the requested scopes are picked in this order:
+
+1.  The `scope` parameter of the resource's `WWW-Authenticate` challenge.
+2.  The `scopes_supported` of the resource's Protected Resource Metadata.
+3.  None: the `scope` parameter is omitted and the authorization server applies its default (RFC 6749 §3.3).
+
+The authorization server's own `scopes_supported` is never requested automatically, since it lists every scope the server knows, not what this resource needs. Set `Config.Scopes` if you need specific scopes (e.g. `openid`).
+
 ## Local Flow for CLI Applications
 
 If you are building a CLI tool, you can use the `LocalFlow` helper to automate the browser opening and callback capture:

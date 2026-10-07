@@ -29,6 +29,9 @@ type Metadata struct {
 	// ChallengeScopes are the scopes the resource asked for in its WWW-Authenticate challenge.
 	// Not part of any metadata document; set by ProbeMetadata.
 	ChallengeScopes []string `json:"challenge_scopes,omitempty"`
+	// ResourceScopes are the scopes_supported of the Protected Resource Metadata that led to
+	// this authorization server. Not part of any metadata document; set when following the chain.
+	ResourceScopes []string `json:"resource_scopes,omitempty"`
 }
 
 // MarshalBinary encodes the Metadata struct into JSON bytes.
@@ -74,6 +77,23 @@ func (m *Metadata) UnmarshalJSON(data []byte) error {
 // GetEndpoints returns the resolved authorization and token URLs.
 func (m *Metadata) GetEndpoints() (auth, token string) {
 	return m.AuthorizationURL, m.TokenURL
+}
+
+// DefaultScopes returns the scopes to request when none are configured: those the resource's
+// challenge asked for, otherwise those its Protected Resource Metadata lists. The AS's
+// scopes_supported is never used: it describes the whole server, not this resource. A nil
+// result means no scope should be requested, letting the AS apply its default (RFC 6749 §3.3).
+func (m *Metadata) DefaultScopes() []string {
+	if m == nil {
+		return nil
+	}
+	if len(m.ChallengeScopes) > 0 {
+		return m.ChallengeScopes
+	}
+	if len(m.ResourceScopes) > 0 {
+		return m.ResourceScopes
+	}
+	return nil
 }
 
 // DiscoverMetadata attempts to find OAuth2 metadata for a given base URL.
@@ -214,9 +234,8 @@ func (a *Authenticator) resolveMetadataChain(ctx context.Context, m *Metadata, v
 		a.logger.Debug("following authorization_servers chain", "next", m.AuthorizationServers[0])
 		next, err := a.greedyDiscover(ctx, m.AuthorizationServers[0], roleAuthServer, visited)
 		if err == nil {
-			if len(next.ScopesSupported) == 0 {
-				next.ScopesSupported = m.ScopesSupported
-			}
+			// Keep the resource's scopes apart from the AS's: they describe what this resource needs.
+			next.ResourceScopes = m.ScopesSupported
 			return next, nil
 		}
 	}

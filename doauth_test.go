@@ -349,7 +349,7 @@ func TestAuthenticator_GetAuthURL_PKCE(t *testing.T) {
 	assert.Equal(t, "S256", q.Get("code_challenge_method"))
 }
 
-func TestAuthenticator_AutoScopes(t *testing.T) {
+func TestAuthenticator_NoScopesFromASMetadata(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -366,16 +366,74 @@ func TestAuthenticator_AutoScopes(t *testing.T) {
 	}
 
 	auth, err := NewAuthenticator(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = auth.Discover(context.Background())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	authURLStr, _, _, _ := auth.GetAuthURL()
-	u, _ := url.Parse(authURLStr)
-	scope := u.Query().Get("scope")
+	authURLStr, _, _, err := auth.GetAuthURL()
+	require.NoError(t, err)
+	u, err := url.Parse(authURLStr)
+	require.NoError(t, err)
 
-	assert.Equal(t, "openid profile email", scope)
+	assert.False(t, u.Query().Has("scope"), "AS scopes_supported must not be requested")
+}
+
+// newPRMServer serves a resource whose 401 challenge carries no scope, pointing at a PRM that
+// lists prmScopes, backed by an AS that supports more scopes.
+func newPRMServer(t *testing.T, prmScopes []string) *httptest.Server {
+	var ts *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://example.com/auth","token_endpoint":"http://example.com/token","scopes_supported":["files:read","files:write","admin"]}`))
+	})
+	mux.HandleFunc("/prm", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Metadata{Resource: ts.URL + "/mcp", AuthorizationServers: []string{ts.URL}, ScopesSupported: prmScopes})
+	})
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+ts.URL+`/prm"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	ts = httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func TestAuthenticator_ResourceScopesOverAS(t *testing.T) {
+	ts := newPRMServer(t, []string{"files:read"})
+
+	auth, err := NewAuthenticator(Config{BaseURL: ts.URL + "/mcp", ClientID: "id", RedirectURL: "url"})
+	require.NoError(t, err)
+
+	_, err = auth.Discover(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"files:read"}, auth.GetMetadata().ResourceScopes)
+	assert.Equal(t, "files:read", scopeFromAuthURL(t, auth))
+}
+
+func TestMetadata_DefaultScopes(t *testing.T) {
+	var nilMeta *Metadata
+	assert.Nil(t, nilMeta.DefaultScopes())
+	assert.Nil(t, (&Metadata{ScopesSupported: []string{"admin"}}).DefaultScopes())
+	assert.Equal(t, []string{"read"}, (&Metadata{ResourceScopes: []string{"read"}, ScopesSupported: []string{"admin"}}).DefaultScopes())
+	assert.Equal(t, []string{"write"}, (&Metadata{ChallengeScopes: []string{"write"}, ResourceScopes: []string{"read"}}).DefaultScopes())
+}
+
+func TestAuthenticator_NoScopesWhenPRMListsNone(t *testing.T) {
+	ts := newPRMServer(t, nil)
+
+	auth, err := NewAuthenticator(Config{BaseURL: ts.URL + "/mcp", ClientID: "id", RedirectURL: "url"})
+	require.NoError(t, err)
+
+	_, err = auth.Discover(context.Background())
+	require.NoError(t, err)
+
+	authURLStr, _, _, err := auth.GetAuthURL()
+	require.NoError(t, err)
+	u, err := url.Parse(authURLStr)
+	require.NoError(t, err)
+	assert.False(t, u.Query().Has("scope"))
 }
 
 // newScopeChallengeServer serves a resource whose 401 challenge asks for "files:read", backed by
