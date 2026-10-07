@@ -378,6 +378,59 @@ func TestAuthenticator_AutoScopes(t *testing.T) {
 	assert.Equal(t, "openid profile email", scope)
 }
 
+// newScopeChallengeServer serves a resource whose 401 challenge asks for "files:read", backed by
+// an AS that supports more scopes.
+func newScopeChallengeServer(t *testing.T) *httptest.Server {
+	var ts *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://example.com/auth","token_endpoint":"http://example.com/token","scopes_supported":["files:read","files:write","admin"]}`))
+	})
+	mux.HandleFunc("/prm", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Metadata{Resource: ts.URL + "/mcp", AuthorizationServers: []string{ts.URL}})
+	})
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+ts.URL+`/prm", scope="files:read"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	ts = httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func scopeFromAuthURL(t *testing.T, auth *Authenticator) string {
+	authURLStr, _, _, err := auth.GetAuthURL()
+	require.NoError(t, err)
+	u, err := url.Parse(authURLStr)
+	require.NoError(t, err)
+	return u.Query().Get("scope")
+}
+
+func TestAuthenticator_ChallengeScopes(t *testing.T) {
+	ts := newScopeChallengeServer(t)
+
+	auth, err := NewAuthenticator(Config{BaseURL: ts.URL + "/mcp", ClientID: "id", RedirectURL: "url"})
+	require.NoError(t, err)
+
+	_, err = auth.Discover(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"files:read"}, auth.GetMetadata().ChallengeScopes)
+	assert.Equal(t, "files:read", scopeFromAuthURL(t, auth))
+}
+
+func TestAuthenticator_ConfigScopesOverrideChallenge(t *testing.T) {
+	ts := newScopeChallengeServer(t)
+
+	auth, err := NewAuthenticator(Config{BaseURL: ts.URL + "/mcp", ClientID: "id", RedirectURL: "url", Scopes: []string{"admin"}})
+	require.NoError(t, err)
+
+	_, err = auth.Discover(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, "admin", scopeFromAuthURL(t, auth))
+}
+
 func TestAuthenticator_Exchange(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)

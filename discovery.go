@@ -25,6 +25,10 @@ type Metadata struct {
 	// Protected Resource Metadata (RFC 9728)
 	Resource             string   `json:"resource,omitempty"`
 	AuthorizationServers []string `json:"authorization_servers,omitempty"`
+
+	// ChallengeScopes are the scopes the resource asked for in its WWW-Authenticate challenge.
+	// Not part of any metadata document; set by ProbeMetadata.
+	ChallengeScopes []string `json:"challenge_scopes,omitempty"`
 }
 
 // MarshalBinary encodes the Metadata struct into JSON bytes.
@@ -249,14 +253,18 @@ func ProbeMetadata(ctx context.Context, baseURL string, client *http.Client, log
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		a.logger.Debug("resource returned 401 Unauthorized, checking for discovery pointers")
-		discoveryURL := ""
+		var challenge wwwAuthChallenge
+		if wwwAuth := resp.Header.Get(HeaderWWWAuthenticate); wwwAuth != "" {
+			challenge = parseWWWAuth(wwwAuth)
+		}
+
+		discoveryURL := resp.Header.Get(HeaderXDiscoveryURL)
 		fallbackRole := roleResource
-		if url := resp.Header.Get(HeaderXDiscoveryURL); url != "" {
-			discoveryURL = url
-		} else if wwwAuth := resp.Header.Get(HeaderWWWAuthenticate); wwwAuth != "" {
-			var isIssuer bool
-			discoveryURL, isIssuer = parseWWWAuth(wwwAuth)
-			if isIssuer {
+		if discoveryURL == "" {
+			if challenge.ResourceMetadata != "" {
+				discoveryURL = challenge.ResourceMetadata
+			} else if challenge.Issuer != "" {
+				discoveryURL = challenge.Issuer
 				fallbackRole = roleAuthServer
 			}
 		}
@@ -270,6 +278,10 @@ func ProbeMetadata(ctx context.Context, baseURL string, client *http.Client, log
 				m, err = a.greedyDiscover(ctx, discoveryURL, fallbackRole, make(map[string]bool))
 			}
 			if err == nil {
+				if len(challenge.Scopes) > 0 {
+					a.logger.Debug("resource challenge requires scopes", "scopes", challenge.Scopes)
+					m.ChallengeScopes = challenge.Scopes
+				}
 				return m, true, nil
 			}
 		}
@@ -279,18 +291,142 @@ func ProbeMetadata(ctx context.Context, baseURL string, client *http.Client, log
 	return nil, false, fmt.Errorf("unexpected status: %d", resp.StatusCode)
 }
 
-// parseWWWAuth extracts discovery URLs from the WWW-Authenticate header.
-// It also reports whether the URL is an issuer (an authorization server) rather than resource metadata.
-func parseWWWAuth(h string) (string, bool) {
-	// Look for resource_metadata="..." or issuer="..."
-	prefixes := []string{`resource_metadata="`, `issuer="`}
-	for _, p := range prefixes {
-		if start := strings.Index(h, p); start != -1 {
-			s := h[start+len(p):]
-			if end := strings.Index(s, `"`); end != -1 {
-				return s[:end], p == `issuer="`
-			}
+// wwwAuthChallenge holds the WWW-Authenticate parameters relevant to discovery.
+type wwwAuthChallenge struct {
+	// ResourceMetadata points at the Protected Resource Metadata document (RFC 9728).
+	ResourceMetadata string
+	// Issuer points at an authorization server (non-standard but seen in the wild).
+	Issuer string
+	// Scopes are the scopes the resource requires (RFC 6750 §3).
+	Scopes []string
+}
+
+// parseWWWAuth extracts discovery pointers and required scopes from the WWW-Authenticate header.
+// Parameters are read from the Bearer challenge if there is one, otherwise from the first challenge.
+func parseWWWAuth(h string) wwwAuthChallenge {
+	challenges := parseAuthChallenges(h)
+	if len(challenges) == 0 {
+		return wwwAuthChallenge{}
+	}
+	params := challenges[0].params
+	for _, c := range challenges {
+		if strings.EqualFold(c.scheme, "Bearer") {
+			params = c.params
+			break
 		}
 	}
-	return "", false
+	c := wwwAuthChallenge{
+		ResourceMetadata: params["resource_metadata"],
+		Issuer:           params["issuer"],
+	}
+	if scopes := strings.Fields(params["scope"]); len(scopes) > 0 {
+		c.Scopes = scopes
+	}
+	return c
+}
+
+// authChallenge is a single challenge of a WWW-Authenticate header.
+type authChallenge struct {
+	scheme string
+	params map[string]string
+}
+
+// parseAuthChallenges splits a WWW-Authenticate header into challenges (RFC 9110 §11.6.1).
+// Parameter names are lowercased; the first occurrence of a parameter wins. It is lenient:
+// parameters without a preceding scheme are accepted, and unquoted values run until the next
+// comma or whitespace so that bare URLs survive.
+func parseAuthChallenges(h string) []authChallenge {
+	var out []authChallenge
+	i := 0
+	for {
+		for i < len(h) && (h[i] == ',' || isAuthSpace(h[i])) {
+			i++
+		}
+		if i >= len(h) {
+			return out
+		}
+
+		name := readAuthToken(h, &i)
+		if name == "" {
+			i++ // unexpected character, skip it
+			continue
+		}
+
+		j := i
+		for j < len(h) && isAuthSpace(h[j]) {
+			j++
+		}
+		if j >= len(h) || h[j] != '=' {
+			out = append(out, authChallenge{scheme: name, params: map[string]string{}})
+			continue
+		}
+
+		// auth-param: name=token or name="quoted string"
+		i = j + 1
+		for i < len(h) && isAuthSpace(h[i]) {
+			i++
+		}
+		var value string
+		if i < len(h) && h[i] == '"' {
+			value = readAuthQuoted(h, &i)
+		} else {
+			start := i
+			for i < len(h) && h[i] != ',' && !isAuthSpace(h[i]) {
+				i++
+			}
+			value = h[start:i]
+		}
+
+		if len(out) == 0 {
+			out = append(out, authChallenge{params: map[string]string{}})
+		}
+		params := out[len(out)-1].params
+		key := strings.ToLower(name)
+		if _, ok := params[key]; !ok {
+			params[key] = value
+		}
+	}
+}
+
+// readAuthToken reads an RFC 9110 token starting at *i.
+func readAuthToken(h string, i *int) string {
+	start := *i
+	for *i < len(h) && isAuthTokenChar(h[*i]) {
+		*i++
+	}
+	return h[start:*i]
+}
+
+// readAuthQuoted reads a quoted string starting at the opening quote at *i, unescaping quoted pairs.
+// An unterminated string runs to the end of the header.
+func readAuthQuoted(h string, i *int) string {
+	var b strings.Builder
+	*i++ // opening quote
+	for *i < len(h) {
+		c := h[*i]
+		switch {
+		case c == '\\' && *i+1 < len(h):
+			b.WriteByte(h[*i+1])
+			*i += 2
+		case c == '"':
+			*i++
+			return b.String()
+		default:
+			b.WriteByte(c)
+			*i++
+		}
+	}
+	return b.String()
+}
+
+func isAuthSpace(c byte) bool {
+	return c == ' ' || c == '\t'
+}
+
+func isAuthTokenChar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	return strings.IndexByte("!#$%&'*+-.^_`|~", c) != -1
 }

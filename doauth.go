@@ -167,10 +167,17 @@ func (a *Authenticator) ApplyMetadata(meta *Metadata) {
 		"auth_url", meta.AuthorizationURL,
 		"token_url", meta.TokenURL)
 
-	// Use server-supported scopes if none provided in config
-	if len(a.oauth2Cfg.Scopes) == 0 && len(meta.ScopesSupported) > 0 {
-		a.oauth2Cfg.Scopes = meta.ScopesSupported
-		a.logger.Debug("using server supported scopes", "scopes", meta.ScopesSupported)
+	// Scopes from config win; otherwise prefer what the resource challenge asked for,
+	// then fall back to everything the server supports.
+	if len(a.oauth2Cfg.Scopes) == 0 {
+		switch {
+		case len(meta.ChallengeScopes) > 0:
+			a.oauth2Cfg.Scopes = meta.ChallengeScopes
+			a.logger.Debug("using challenge scopes", "scopes", meta.ChallengeScopes)
+		case len(meta.ScopesSupported) > 0:
+			a.oauth2Cfg.Scopes = meta.ScopesSupported
+			a.logger.Debug("using server supported scopes", "scopes", meta.ScopesSupported)
+		}
 	}
 }
 
