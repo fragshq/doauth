@@ -111,6 +111,77 @@ func TestDiscovery_Probe_PreferredOverWellKnown(t *testing.T) {
 	assert.Equal(t, "http://right.example.com/auth", auth.GetMetadata().AuthorizationURL)
 }
 
+func TestGetWellKnownURLs_Order(t *testing.T) {
+	a := &Authenticator{}
+	assert.Equal(t, []string{
+		"https://h/.well-known/oauth-protected-resource/mcp",
+		"https://h/mcp/.well-known/oauth-protected-resource",
+		"https://h/.well-known/oauth-protected-resource",
+		"https://h/.well-known/oauth-authorization-server/mcp",
+		"https://h/.well-known/openid-configuration/mcp",
+		"https://h/mcp/.well-known/openid-configuration",
+		"https://h/mcp/.well-known/oauth-authorization-server",
+		"https://h/.well-known/oauth-authorization-server",
+		"https://h/.well-known/openid-configuration",
+	}, a.getWellKnownURLs("https://h/mcp", roleResource))
+	assert.Equal(t, []string{
+		"https://h/.well-known/oauth-protected-resource",
+		"https://h/.well-known/oauth-authorization-server",
+		"https://h/.well-known/openid-configuration",
+	}, a.getWellKnownURLs("https://h", roleResource))
+	assert.Equal(t, []string{
+		"https://h/.well-known/oauth-authorization-server",
+		"https://h/.well-known/openid-configuration",
+	}, a.getWellKnownURLs("https://h", roleAuthServer))
+}
+
+func TestDiscovery_PRMPreferredOverASMetadata(t *testing.T) {
+	muxAS := http.NewServeMux()
+	muxAS.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://right.example.com/auth","token_endpoint":"http://right.example.com/token"}`))
+	})
+	tsAS := httptest.NewServer(muxAS)
+	defer tsAS.Close()
+
+	var tsRes *httptest.Server
+	muxRes := http.NewServeMux()
+	muxRes.HandleFunc("/.well-known/openid-configuration/mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://wrong.example.com/auth","token_endpoint":"http://wrong.example.com/token"}`))
+	})
+	muxRes.HandleFunc("/.well-known/oauth-protected-resource/mcp", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Metadata{Resource: tsRes.URL + "/mcp", AuthorizationServers: []string{tsAS.URL}})
+	})
+	tsRes = httptest.NewServer(muxRes)
+	defer tsRes.Close()
+
+	auth, err := NewAuthenticator(Config{BaseURL: tsRes.URL + "/mcp", ClientID: "id", RedirectURL: "url"})
+	require.NoError(t, err)
+
+	_, err = auth.Discover(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, "http://right.example.com/auth", auth.GetMetadata().AuthorizationURL)
+}
+
+func TestDiscovery_ContinuesPastUnresolvablePRM(t *testing.T) {
+	var tsRes *httptest.Server
+	muxRes := http.NewServeMux()
+	muxRes.HandleFunc("/.well-known/oauth-protected-resource/mcp", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Metadata{Resource: tsRes.URL + "/mcp", AuthorizationServers: []string{"http://127.0.0.1:1/unreachable"}})
+	})
+	muxRes.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://example.com/auth","token_endpoint":"http://example.com/token"}`))
+	})
+	tsRes = httptest.NewServer(muxRes)
+	defer tsRes.Close()
+
+	auth, err := NewAuthenticator(Config{BaseURL: tsRes.URL + "/mcp", ClientID: "id", RedirectURL: "url"})
+	require.NoError(t, err)
+
+	_, err = auth.Discover(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, "http://example.com/auth", auth.GetMetadata().AuthorizationURL)
+}
+
 func TestDiscovery_Probe_401(t *testing.T) {
 	muxDisc := http.NewServeMux()
 	muxDisc.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
