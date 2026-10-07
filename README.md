@@ -63,13 +63,22 @@ func main() {
 
 `doauth` uses a "greedy" approach to find authorization metadata. When you call `Discover()`, it performs the following steps:
 
-1.  **Standard Well-Known Paths**: It checks the resource path and the host root for:
-    -   `/.well-known/openid-configuration`
-    -   `/.well-known/oauth-authorization-server`
-    -   `/.well-known/oauth-protected-resource`
-2.  **Greedy Fetch**: It attempts to fetch the `BaseURL` directly, as some servers serve metadata at the root of the API path.
-3.  **Probing**: If a resource returns `401 Unauthorized`, `doauth` parses the `WWW-Authenticate` header looking for `issuer` or `resource_metadata` (RFC 9728) to find the actual authorization server.
-4.  **Chain Resolution**: If the discovery points to a "Protected Resource Metadata" (RFC 9728), it follows the chain to the actual Authorization Server automatically.
+1.  **Probing**: It requests the `BaseURL`. If it returns `401 Unauthorized`, `doauth` follows the `X-Discovery-URL` header or the `resource_metadata` (RFC 9728) / `issuer` parameter of `WWW-Authenticate`, fetching the pointed document directly first. A server's own pointer always wins over guessed locations.
+2.  **Standard Well-Known Paths**: Otherwise it checks, most specific first:
+    -   Protected Resource Metadata: `/.well-known/oauth-protected-resource` inserted before the path, appended to it, then at the host root.
+    -   Authorization Server Metadata, in case the resource is its own authorization server: `/.well-known/oauth-authorization-server` and `/.well-known/openid-configuration` inserted before the path, appended to it, then at the host root.
+3.  **Greedy Fetch**: It attempts to fetch the `BaseURL` directly, as some servers serve metadata at the root of the API path.
+4.  **Chain Resolution**: If the discovery points to a "Protected Resource Metadata" (RFC 9728), it follows the chain to the actual Authorization Server, which is looked up in RFC 8414 order. If the chain can't be resolved, the search moves on to the next location.
+
+### Scope Selection
+
+When `Config.Scopes` is empty, the requested scopes are picked in this order:
+
+1.  The `scope` parameter of the resource's `WWW-Authenticate` challenge.
+2.  The `scopes_supported` of the resource's Protected Resource Metadata.
+3.  None: the `scope` parameter is omitted and the authorization server applies its default (RFC 6749 §3.3).
+
+The authorization server's own `scopes_supported` is never requested automatically, since it lists every scope the server knows, not what this resource needs. Set `Config.Scopes` if you need specific scopes (e.g. `openid`).
 
 ## Local Flow for CLI Applications
 

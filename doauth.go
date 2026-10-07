@@ -124,7 +124,18 @@ func (a *Authenticator) Discover(ctx context.Context) (bool, error) {
 
 	a.logger.Debug("starting discovery", "base_url", a.cfg.BaseURL)
 
-	// 1. Try standard discovery locations
+	// 1. Probe the resource first: a 401 challenge pointing at the resource metadata
+	// is authoritative (MCP / RFC 9728) and must win over guessed well-known paths.
+	probeMeta, authRequired, probeErr := ProbeMetadata(ctx, a.cfg.BaseURL, a.client, a.logger)
+	if probeErr == nil && probeMeta != nil && probeMeta.AuthorizationURL != "" && probeMeta.TokenURL != "" {
+		a.logger.Debug("probe discovery successful")
+		a.ApplyMetadata(probeMeta)
+		return true, nil
+	}
+
+	a.logger.Debug("probe did not yield metadata, trying standard discovery", "error", probeErr)
+
+	// 2. Fall back to standard discovery locations
 	meta, err := DiscoverMetadata(ctx, a.cfg.BaseURL, a.client, a.logger)
 	if err == nil {
 		a.logger.Debug("standard discovery successful")
@@ -132,18 +143,8 @@ func (a *Authenticator) Discover(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 
-	a.logger.Debug("standard discovery failed, probing resource", "error", err)
-
-	// 2. Probe the endpoint (handles 401 challenges)
-	meta, authRequired, err := ProbeMetadata(ctx, a.cfg.BaseURL, a.client, a.logger)
-	if err != nil {
-		return authRequired, fmt.Errorf("discovery and probing failed: %w", err)
-	}
-
-	if meta != nil && meta.AuthorizationURL != "" && meta.TokenURL != "" {
-		a.logger.Debug("probe discovery successful")
-		a.ApplyMetadata(meta)
-		return true, nil
+	if probeErr != nil {
+		return authRequired, fmt.Errorf("discovery and probing failed: %w", probeErr)
 	}
 
 	if authRequired {
@@ -166,10 +167,12 @@ func (a *Authenticator) ApplyMetadata(meta *Metadata) {
 		"auth_url", meta.AuthorizationURL,
 		"token_url", meta.TokenURL)
 
-	// Use server-supported scopes if none provided in config
-	if len(a.oauth2Cfg.Scopes) == 0 && len(meta.ScopesSupported) > 0 {
-		a.oauth2Cfg.Scopes = meta.ScopesSupported
-		a.logger.Debug("using server supported scopes", "scopes", meta.ScopesSupported)
+	// Scopes from config win; otherwise use the ones the discovered metadata points at.
+	if len(a.oauth2Cfg.Scopes) == 0 {
+		if scopes := meta.DefaultScopes(); len(scopes) > 0 {
+			a.oauth2Cfg.Scopes = scopes
+			a.logger.Debug("using discovered scopes", "scopes", scopes)
+		}
 	}
 }
 

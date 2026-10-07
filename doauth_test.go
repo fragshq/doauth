@@ -78,6 +78,110 @@ func TestDiscovery_Probe_MCP(t *testing.T) {
 	assert.Equal(t, "http://example.com/auth", auth.GetMetadata().AuthorizationURL)
 }
 
+func TestDiscovery_Probe_PreferredOverWellKnown(t *testing.T) {
+	muxAS := http.NewServeMux()
+	muxAS.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://right.example.com/auth","token_endpoint":"http://right.example.com/token"}`))
+	})
+	tsAS := httptest.NewServer(muxAS)
+	defer tsAS.Close()
+
+	// Shared host: the root advertises some other AS, the tenant's MCP resource points elsewhere.
+	var tsRes *httptest.Server
+	muxRes := http.NewServeMux()
+	muxRes.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://wrong.example.com/auth","token_endpoint":"http://wrong.example.com/token"}`))
+	})
+	muxRes.HandleFunc("/prm/tenantA", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Metadata{Resource: tsRes.URL + "/tenantA/mcp", AuthorizationServers: []string{tsAS.URL}})
+	})
+	muxRes.HandleFunc("/tenantA/mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+tsRes.URL+`/prm/tenantA"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	tsRes = httptest.NewServer(muxRes)
+	defer tsRes.Close()
+
+	auth, err := NewAuthenticator(Config{BaseURL: tsRes.URL + "/tenantA/mcp", ClientID: "id", RedirectURL: "url"})
+	require.NoError(t, err)
+
+	required, err := auth.Discover(context.Background())
+	assert.NoError(t, err)
+	assert.True(t, required)
+	assert.Equal(t, "http://right.example.com/auth", auth.GetMetadata().AuthorizationURL)
+}
+
+func TestGetWellKnownURLs_Order(t *testing.T) {
+	a := &Authenticator{}
+	assert.Equal(t, []string{
+		"https://h/.well-known/oauth-protected-resource/mcp",
+		"https://h/mcp/.well-known/oauth-protected-resource",
+		"https://h/.well-known/oauth-protected-resource",
+		"https://h/.well-known/oauth-authorization-server/mcp",
+		"https://h/.well-known/openid-configuration/mcp",
+		"https://h/mcp/.well-known/openid-configuration",
+		"https://h/mcp/.well-known/oauth-authorization-server",
+		"https://h/.well-known/oauth-authorization-server",
+		"https://h/.well-known/openid-configuration",
+	}, a.getWellKnownURLs("https://h/mcp", roleResource))
+	assert.Equal(t, []string{
+		"https://h/.well-known/oauth-protected-resource",
+		"https://h/.well-known/oauth-authorization-server",
+		"https://h/.well-known/openid-configuration",
+	}, a.getWellKnownURLs("https://h", roleResource))
+	assert.Equal(t, []string{
+		"https://h/.well-known/oauth-authorization-server",
+		"https://h/.well-known/openid-configuration",
+	}, a.getWellKnownURLs("https://h", roleAuthServer))
+}
+
+func TestDiscovery_PRMPreferredOverASMetadata(t *testing.T) {
+	muxAS := http.NewServeMux()
+	muxAS.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://right.example.com/auth","token_endpoint":"http://right.example.com/token"}`))
+	})
+	tsAS := httptest.NewServer(muxAS)
+	defer tsAS.Close()
+
+	var tsRes *httptest.Server
+	muxRes := http.NewServeMux()
+	muxRes.HandleFunc("/.well-known/openid-configuration/mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://wrong.example.com/auth","token_endpoint":"http://wrong.example.com/token"}`))
+	})
+	muxRes.HandleFunc("/.well-known/oauth-protected-resource/mcp", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Metadata{Resource: tsRes.URL + "/mcp", AuthorizationServers: []string{tsAS.URL}})
+	})
+	tsRes = httptest.NewServer(muxRes)
+	defer tsRes.Close()
+
+	auth, err := NewAuthenticator(Config{BaseURL: tsRes.URL + "/mcp", ClientID: "id", RedirectURL: "url"})
+	require.NoError(t, err)
+
+	_, err = auth.Discover(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, "http://right.example.com/auth", auth.GetMetadata().AuthorizationURL)
+}
+
+func TestDiscovery_ContinuesPastUnresolvablePRM(t *testing.T) {
+	var tsRes *httptest.Server
+	muxRes := http.NewServeMux()
+	muxRes.HandleFunc("/.well-known/oauth-protected-resource/mcp", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Metadata{Resource: tsRes.URL + "/mcp", AuthorizationServers: []string{"http://127.0.0.1:1/unreachable"}})
+	})
+	muxRes.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://example.com/auth","token_endpoint":"http://example.com/token"}`))
+	})
+	tsRes = httptest.NewServer(muxRes)
+	defer tsRes.Close()
+
+	auth, err := NewAuthenticator(Config{BaseURL: tsRes.URL + "/mcp", ClientID: "id", RedirectURL: "url"})
+	require.NoError(t, err)
+
+	_, err = auth.Discover(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, "http://example.com/auth", auth.GetMetadata().AuthorizationURL)
+}
+
 func TestDiscovery_Probe_401(t *testing.T) {
 	muxDisc := http.NewServeMux()
 	muxDisc.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +349,7 @@ func TestAuthenticator_GetAuthURL_PKCE(t *testing.T) {
 	assert.Equal(t, "S256", q.Get("code_challenge_method"))
 }
 
-func TestAuthenticator_AutoScopes(t *testing.T) {
+func TestAuthenticator_NoScopesFromASMetadata(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -262,16 +366,127 @@ func TestAuthenticator_AutoScopes(t *testing.T) {
 	}
 
 	auth, err := NewAuthenticator(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = auth.Discover(context.Background())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	authURLStr, _, _, _ := auth.GetAuthURL()
-	u, _ := url.Parse(authURLStr)
-	scope := u.Query().Get("scope")
+	authURLStr, _, _, err := auth.GetAuthURL()
+	require.NoError(t, err)
+	u, err := url.Parse(authURLStr)
+	require.NoError(t, err)
 
-	assert.Equal(t, "openid profile email", scope)
+	assert.False(t, u.Query().Has("scope"), "AS scopes_supported must not be requested")
+}
+
+// newPRMServer serves a resource whose 401 challenge carries no scope, pointing at a PRM that
+// lists prmScopes, backed by an AS that supports more scopes.
+func newPRMServer(t *testing.T, prmScopes []string) *httptest.Server {
+	var ts *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://example.com/auth","token_endpoint":"http://example.com/token","scopes_supported":["files:read","files:write","admin"]}`))
+	})
+	mux.HandleFunc("/prm", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Metadata{Resource: ts.URL + "/mcp", AuthorizationServers: []string{ts.URL}, ScopesSupported: prmScopes})
+	})
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+ts.URL+`/prm"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	ts = httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func TestAuthenticator_ResourceScopesOverAS(t *testing.T) {
+	ts := newPRMServer(t, []string{"files:read"})
+
+	auth, err := NewAuthenticator(Config{BaseURL: ts.URL + "/mcp", ClientID: "id", RedirectURL: "url"})
+	require.NoError(t, err)
+
+	_, err = auth.Discover(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"files:read"}, auth.GetMetadata().ResourceScopes)
+	assert.Equal(t, "files:read", scopeFromAuthURL(t, auth))
+}
+
+func TestMetadata_DefaultScopes(t *testing.T) {
+	var nilMeta *Metadata
+	assert.Nil(t, nilMeta.DefaultScopes())
+	assert.Nil(t, (&Metadata{ScopesSupported: []string{"admin"}}).DefaultScopes())
+	assert.Equal(t, []string{"read"}, (&Metadata{ResourceScopes: []string{"read"}, ScopesSupported: []string{"admin"}}).DefaultScopes())
+	assert.Equal(t, []string{"write"}, (&Metadata{ChallengeScopes: []string{"write"}, ResourceScopes: []string{"read"}}).DefaultScopes())
+}
+
+func TestAuthenticator_NoScopesWhenPRMListsNone(t *testing.T) {
+	ts := newPRMServer(t, nil)
+
+	auth, err := NewAuthenticator(Config{BaseURL: ts.URL + "/mcp", ClientID: "id", RedirectURL: "url"})
+	require.NoError(t, err)
+
+	_, err = auth.Discover(context.Background())
+	require.NoError(t, err)
+
+	authURLStr, _, _, err := auth.GetAuthURL()
+	require.NoError(t, err)
+	u, err := url.Parse(authURLStr)
+	require.NoError(t, err)
+	assert.False(t, u.Query().Has("scope"))
+}
+
+// newScopeChallengeServer serves a resource whose 401 challenge asks for "files:read", backed by
+// an AS that supports more scopes.
+func newScopeChallengeServer(t *testing.T) *httptest.Server {
+	var ts *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"authorization_endpoint":"http://example.com/auth","token_endpoint":"http://example.com/token","scopes_supported":["files:read","files:write","admin"]}`))
+	})
+	mux.HandleFunc("/prm", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Metadata{Resource: ts.URL + "/mcp", AuthorizationServers: []string{ts.URL}})
+	})
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+ts.URL+`/prm", scope="files:read"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	ts = httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func scopeFromAuthURL(t *testing.T, auth *Authenticator) string {
+	authURLStr, _, _, err := auth.GetAuthURL()
+	require.NoError(t, err)
+	u, err := url.Parse(authURLStr)
+	require.NoError(t, err)
+	return u.Query().Get("scope")
+}
+
+func TestAuthenticator_ChallengeScopes(t *testing.T) {
+	ts := newScopeChallengeServer(t)
+
+	auth, err := NewAuthenticator(Config{BaseURL: ts.URL + "/mcp", ClientID: "id", RedirectURL: "url"})
+	require.NoError(t, err)
+
+	_, err = auth.Discover(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"files:read"}, auth.GetMetadata().ChallengeScopes)
+	assert.Equal(t, "files:read", scopeFromAuthURL(t, auth))
+}
+
+func TestAuthenticator_ConfigScopesOverrideChallenge(t *testing.T) {
+	ts := newScopeChallengeServer(t)
+
+	auth, err := NewAuthenticator(Config{BaseURL: ts.URL + "/mcp", ClientID: "id", RedirectURL: "url", Scopes: []string{"admin"}})
+	require.NoError(t, err)
+
+	_, err = auth.Discover(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, "admin", scopeFromAuthURL(t, auth))
 }
 
 func TestAuthenticator_Exchange(t *testing.T) {
