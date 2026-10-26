@@ -14,7 +14,8 @@ import (
 
 // Config represents the configuration for the Authenticator.
 type Config struct {
-	// Name is the application's name
+	// Name identifies the protected resource (e.g. the MCP server) in the caller's configuration.
+	// It is not sent to the authorization server.
 	Name string
 	// BaseURL is the authorization server's base URL used for discovery.
 	BaseURL string
@@ -33,6 +34,8 @@ type Config struct {
 	// AuthorizationURL and TokenURL can be provided manually to bypass discovery.
 	AuthorizationURL string
 	TokenURL         string
+	// RegistrationURL can be provided manually to make Register skip discovery.
+	RegistrationURL string
 }
 
 func (c *Config) McpFingerprint() string {
@@ -46,6 +49,13 @@ type Authenticator struct {
 	metadata  *Metadata
 	client    *http.Client
 	logger    *slog.Logger
+
+	// clientName is the client_name announced by Register.
+	clientName string
+	// initialAccessToken authorizes the registration request (RFC 7591 §3). Used by Register only.
+	initialAccessToken string
+	// tokenEndpointAuthMethod is the client authentication method requested by Register.
+	tokenEndpointAuthMethod string
 }
 
 // Option defines a functional option for configuring the Authenticator.
@@ -73,7 +83,12 @@ func NewAuthenticator(cfg Config, opts ...Option) (*Authenticator, error) {
 	if cfg.RedirectURL == "" && !cfg.AllowClientCredentials {
 		return nil, fmt.Errorf("RedirectURL is required when client credentials are not allowed")
 	}
+	return newAuthenticator(cfg, opts...), nil
+}
 
+// newAuthenticator builds an Authenticator without validating the client configuration,
+// so that Register can run discovery before a client ID exists.
+func newAuthenticator(cfg Config, opts ...Option) *Authenticator {
 	auth := &Authenticator{
 		cfg:    cfg,
 		client: http.DefaultClient,
@@ -106,7 +121,7 @@ func NewAuthenticator(cfg Config, opts ...Option) (*Authenticator, error) {
 		Endpoint:     endpoint,
 	}
 
-	return auth, nil
+	return auth
 }
 
 // Discover attempts to find OAuth2 metadata.
