@@ -25,6 +25,25 @@ const (
 	ParamCodeVerifier        = "code_verifier"
 )
 
+// Grant types
+const (
+	GrantAuthorizationCode = "authorization_code"
+	GrantRefreshToken      = "refresh_token"
+	GrantClientCredentials = "client_credentials"
+)
+
+// Response types
+const (
+	ResponseTypeCode = "code"
+)
+
+// Token endpoint authentication methods (RFC 7591 §2)
+const (
+	AuthMethodNone              = "none"
+	AuthMethodClientSecretBasic = "client_secret_basic"
+	AuthMethodClientSecretPost  = "client_secret_post"
+)
+
 // PKCE methods
 const (
 	MethodS256 = "S256"

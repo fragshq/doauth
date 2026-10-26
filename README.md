@@ -126,6 +126,43 @@ if auth.CanUseClientCredentials() {
 
 If the token is expired and has no refresh token (as is typical for client credentials tokens), calling `auth.RefreshToken(ctx, token)` will automatically request a new token via client credentials if the capability is available.
 
+## Dynamic Client Registration
+
+If you don't have a client ID yet, `Register` obtains one from the authorization server via RFC 7591. It discovers the `registration_endpoint` from `BaseURL`, registers the client and returns the issued credentials. It does not authenticate anyone: store the result and use it later with `NewAuthenticator`.
+
+```go
+// Registration phase: no user involved
+reg, err := doauth.Register(ctx, doauth.Config{
+    BaseURL:     "https://mcp.example.com",
+    RedirectURL: "http://localhost:8080/callback",
+}, doauth.WithClientName("my-app"))
+switch {
+case errors.Is(err, doauth.ErrRegistrationNotSupported):
+    // No registration endpoint: ask the user for a client ID and secret instead
+case errors.Is(err, doauth.ErrAuthNotRequired):
+    // The resource is open, nothing to register
+case err != nil:
+    // *doauth.RegistrationError carries the server's error code and description
+}
+store.Save(reg) // ClientRegistration is JSON-serializable
+
+// Authorization phase, later
+auth, _ := doauth.NewAuthenticator(doauth.Config{
+    BaseURL:      "https://mcp.example.com",
+    ClientID:     reg.ClientID,
+    ClientSecret: reg.ClientSecret,
+    RedirectURL:  "http://localhost:8080/callback",
+})
+```
+
+The request is built from the `Config`: `RedirectURL` becomes the only redirect URI (with the `authorization_code` and `refresh_token` grants), `AllowClientCredentials` adds the `client_credentials` grant, and the configured or discovered scopes become `scope`. The `client_name` shown on consent screens is set with `WithClientName`; `Config.Name` is never sent. Things to keep in mind:
+
+- The redirect URI is fixed at registration: the authorization phase must use the exact same `RedirectURL`, so `LocalFlow` needs a fixed port.
+- Use the same `Scopes` in both phases, since the server may restrict the client to the scopes it registered with.
+- Persist the registration rather than registering on every run, keyed by `reg.Issuer` when several resources share an authorization server. Register again once `reg.SecretExpired()` is true.
+- `WithInitialAccessToken(token)` authorizes the request on servers that restrict registration; `WithTokenEndpointAuthMethod(doauth.AuthMethodNone)` registers a public (PKCE-only) client, which gets no secret.
+- Set `Config.RegistrationURL` to skip discovery entirely.
+
 ## Manual Configuration
 
 If your environment doesn't support discovery, or you want to bypass it, you can provide endpoints manually:
@@ -170,6 +207,7 @@ url, state, verifier, _ := auth.GetAuthURL(
 - **RFC 7636**: PKCE (Proof Key for Code Exchange).
 - **RFC 6750**: Bearer Token usage via `AuthorizeRequest`.
 - **RFC 6749 Section 4.4**: Client Credentials Grant.
+- **RFC 7591**: OAuth 2.0 Dynamic Client Registration.
 
 ## License
 
